@@ -18,6 +18,11 @@
 #include "canvas/Persistency/Common/FindManyP.h"
 #include "messagefacility/MessageLogger/MessageLogger.h"
 
+
+#include "larcore/Geometry/Geometry.h"
+#include "larcorealg/Geometry/GeometryCore.h"
+#include "larcorealg/Geometry/TPCGeo.h"
+
 #include "nusimdata/SimulationBase/MCTruth.h"
 #include "lardataobj/RecoBase/Hit.h"
 #include "lardataobj/RecoBase/SpacePoint.h"
@@ -62,7 +67,7 @@ private:
 
   hep_hpc::hdf5::Ntuple<hep_hpc::hdf5::Column<int, 1>,    // event id (run, subrun, event)
                         hep_hpc::hdf5::Column<int, 1>,    // is cc
-			hep_hpc::hdf5::Column<int, 1>, // nu pdg
+	                hep_hpc::hdf5::Column<int, 1>, // nu pdg
                         hep_hpc::hdf5::Column<float, 1>,  // nu energy
                         hep_hpc::hdf5::Column<float, 1>,  // lep energy
                         hep_hpc::hdf5::Column<float, 1>   // nu dir (x, y, z)
@@ -103,6 +108,13 @@ private:
                         hep_hpc::hdf5::Column<int, 1>,    // g4 id
                         hep_hpc::hdf5::Column<float, 1>   // deposited energy [ MeV ]
   >* fEnergyDepNtuple; ///< energy deposition ntuple
+
+  hep_hpc::hdf5::Ntuple<hep_hpc::hdf5::Column<float, 1>,  // TPC module center (x, y, z)
+                        hep_hpc::hdf5::Column<int, 1>,     // drift direction 
+                        hep_hpc::hdf5::Column<int, 1>      // tpc id 
+  >* fDetectorNtuple;
+
+
 };
 
 
@@ -115,11 +127,13 @@ HDF5Maker::HDF5Maker(fhicl::ParameterSet const& p)
     fUseMap(    p.get<bool>("UseMap", false)),
     fEventInfo( p.get<std::string>("EventInfo")),
     fOutputName(p.get<std::string>("OutputName"))
+
 {
   if (fEventInfo != "none" && fEventInfo != "nu")
     throw art::Exception(art::errors::Configuration)
       << "EventInfo must be \"none\" or \"nu\", not " << fEventInfo;
 }
+  std::vector<double> tpc_ids_checked = {}; 
 
 void HDF5Maker::analyze(art::Event const& e)
 {
@@ -196,7 +210,7 @@ void HDF5Maker::analyze(art::Event const& e)
 
   // Fill spacepoint table
   for (size_t i = 0; i < splist.size(); ++i) {
-
+    
     std::array<float, 3> pos {
       (float)splist[i]->XYZ()[0],
       (float)splist[i]->XYZ()[1],
@@ -208,7 +222,7 @@ void HDF5Maker::analyze(art::Event const& e)
       hitID[sp2Hit[i][j]->View()] = sp2Hit[i][j].key();
 
     fSpacePointNtuple->insert(evtID.data(),
-      splist[i]->ID(), pos.data(), hitID.data()
+      splist[i]->ID(), pos.data() , hitID.data()
     );
 
     mf::LogInfo("HDF5Maker") << "Filling spacepoint table"
@@ -225,27 +239,31 @@ void HDF5Maker::analyze(art::Event const& e)
   std::set<int> g4id;
   auto const clockData = art::ServiceHandle<detinfo::DetectorClocksService>()->DataFor(e);
   auto const detProp = art::ServiceHandle<detinfo::DetectorPropertiesService>()->DataFor(e, clockData);
-
+  
   std::unique_ptr<art::FindManyP<simb::MCParticle, anab::BackTrackerHitMatchingData>> hittruth;
   if (fUseMap) {
     hittruth = std::unique_ptr<art::FindManyP<simb::MCParticle, anab::BackTrackerHitMatchingData> >(new art::FindManyP<simb::MCParticle, anab::BackTrackerHitMatchingData>(hitListHandle, e, fHitTruthLabel));
   }
 
+
   // Loop over hits
   for (art::Ptr<recob::Hit> hit : hitlist) {
+
+
 
     // Fill hit table
     geo::WireID wireid = hit->WireID();
     size_t plane = wireid.Plane;
     size_t wire = wireid.Wire;
     double time = hit->PeakTime();
+
     fHitNtuple->insert(evtID.data(),
       hit.key(), hit->Integral(), hit->RMS(), wireid.TPC,
       plane, wire, time,
       wireid.Plane, wireid.Wire, hit->PeakTime()
     );
 
-    mf::LogInfo("HDF5Maker") << "Filling hit table"
+        mf::LogInfo("HDF5Maker") << "Filling hit table"
                              << "\nrun " << evtID[0] << ", subrun " << evtID[1]
                              << ", event " << evtID[2]
                              << "\nhit id " << hit.key() << ", integral "
@@ -256,6 +274,45 @@ void HDF5Maker::analyze(art::Event const& e)
                              << "\nlocal plane " << wireid.Plane
                              << ", local wire " << wireid.Wire
                              << ", local time " << hit->PeakTime();
+                           
+
+
+    // Get the tpc geometry information from the id
+    if(std::find(tpc_ids_checked.begin(), tpc_ids_checked.end(), wireid.TPC ) != tpc_ids_checked.end())
+    {
+
+    }
+
+    else {
+
+    auto const& tpcgeom = art::ServiceHandle<geo::Geometry>()->TPC(geo::TPCID{0,wireid.TPC});
+    geo::Point_t center = tpcgeom.GetCenter();
+
+    std::array<float, 3> cen {
+      
+      (float)geo::vect::Xcoord(center),
+      (float)geo::vect::Ycoord(center),
+      (float)geo::vect::Zcoord(center)
+
+    };
+   
+
+    fDetectorNtuple->insert(cen.data(),tpcgeom.DetectDriftDirection(),wireid.TPC
+    );
+
+
+    mf::LogInfo("HDF5Maker") << "Filling detector table"
+                             << "\nrun " << evtID[0] << ", subrun " << evtID[1]
+                             << ", event " << evtID[2]
+                             << "\n tpc center" << cen.data()
+                             << "\n drift direction " << tpcgeom.DetectDriftDirection()
+                             << "\n tpc " << wireid.TPC;
+
+    tpc_ids_checked.push_back(wireid.TPC);
+    }
+
+
+
 
     // Fill energy deposit table
     if (fUseMap) {
@@ -333,6 +390,12 @@ void HDF5Maker::analyze(art::Event const& e)
                              << "\nstart process " << p->Process()
                              << ", end process " << p->EndProcess();
   }
+
+ 
+
+
+  
+
 } // function HDF5Maker::analyze
 
 void HDF5Maker::beginSubRun(art::SubRun const& sr) {
@@ -400,12 +463,21 @@ void HDF5Maker::beginSubRun(art::SubRun const& sr) {
   ));
 
   fEnergyDepNtuple = new hep_hpc::hdf5::Ntuple(
-    hep_hpc::hdf5::make_ntuple({fFile, "edep_table", 1000},
+      hep_hpc::hdf5::make_ntuple({fFile, "edep_table", 1000},
       hep_hpc::hdf5::make_column<int>("event_id", 3),
       hep_hpc::hdf5::make_scalar_column<int>("hit_id"),
       hep_hpc::hdf5::make_scalar_column<int>("g4_id"),
       hep_hpc::hdf5::make_scalar_column<float>("energy")
   ));
+  
+  fDetectorNtuple = new hep_hpc::hdf5::Ntuple(
+      hep_hpc::hdf5::make_ntuple({fFile, "detector_table", 1000},
+      hep_hpc::hdf5::make_column<float>("tpc_center", 3),
+      hep_hpc::hdf5::make_scalar_column<int>("drift_direction"),
+      hep_hpc::hdf5::make_scalar_column<int>("tpc")
+  ));
+
+
 }
 
 void HDF5Maker::endSubRun(art::SubRun const& sr) {
@@ -415,6 +487,7 @@ void HDF5Maker::endSubRun(art::SubRun const& sr) {
   delete fHitNtuple;
   delete fParticleNtuple;
   delete fEnergyDepNtuple;
+  delete fDetectorNtuple;
   fFile.close();
 }
 
